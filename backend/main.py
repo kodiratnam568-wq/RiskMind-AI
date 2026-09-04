@@ -1,11 +1,13 @@
 from pathlib import Path
 
+import joblib
+import pandas as pd
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from backend.models import Transaction
-from ml.risk_model import predict_risk
 
 
 # =========================================================
@@ -17,7 +19,36 @@ FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 
 # =========================================================
-# APP
+# FIND MODEL
+# =========================================================
+
+MODEL_CANDIDATES = [
+    BASE_DIR / "ml" / "risk_model.pkl",
+    BASE_DIR / "ml " / "risk_model.pkl",
+    BASE_DIR / "risk_model.pkl",
+]
+
+
+MODEL_PATH = None
+
+for candidate in MODEL_CANDIDATES:
+    if candidate.exists():
+        MODEL_PATH = candidate
+        break
+
+
+# =========================================================
+# LOAD MODEL
+# =========================================================
+
+model = None
+
+if MODEL_PATH is not None:
+    model = joblib.load(MODEL_PATH)
+
+
+# =========================================================
+# FASTAPI
 # =========================================================
 
 app = FastAPI(
@@ -33,18 +64,15 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # =========================================================
-# ROOT / API
+# ROOT
 # =========================================================
 
 @app.get("/api")
@@ -55,30 +83,62 @@ def api_home():
     }
 
 
+# =========================================================
+# HEALTH
+# =========================================================
+
 @app.get("/health")
 def health_check():
+
     return {
         "server": "online",
         "ai_system": "ready",
-        "ml_engine": "loaded",
+        "ml_engine": "loaded" if model else "model_not_found",
+        "model_path": str(MODEL_PATH) if MODEL_PATH else None,
         "frontend": FRONTEND_DIST.exists(),
         "version": "1.0"
     }
 
 
 # =========================================================
-# TRANSACTION ANALYSIS
+# ANALYZE TRANSACTION
 # =========================================================
 
 @app.post("/analyze")
 def analyze_transaction(transaction: Transaction):
 
-    result = predict_risk(transaction)
+    if model is None:
+        return {
+            "error": "Risk model file was not found."
+        }
 
-    probability = result["fraud_probability"]
+
+    data = pd.DataFrame([
+        {
+            "amount": transaction.amount,
+            "location": transaction.location,
+            "transactions_last_hour":
+                transaction.transactions_last_hour,
+            "is_new_device":
+                int(transaction.is_new_device),
+            "is_new_location":
+                int(transaction.is_new_location)
+        }
+    ])
+
+
+    prediction = model.predict(data)[0]
+
+    probability = model.predict_proba(data)[0][1]
+
+    probability = float(probability)
 
     risk_score = round(probability * 100)
 
+
+    # =====================================================
+    # RISK LEVEL
+    # =====================================================
 
     if risk_score >= 70:
 
@@ -100,7 +160,7 @@ def analyze_transaction(transaction: Transaction):
 
 
     # =====================================================
-    # EXPLAINABLE RISK FACTORS
+    # RISK FACTORS
     # =====================================================
 
     reasons = []
@@ -146,9 +206,10 @@ def analyze_transaction(transaction: Transaction):
     # =====================================================
 
     return {
+        "prediction": int(prediction),
         "risk_score": risk_score,
         "risk_level": risk_level,
-        "fraud_probability": probability,
+        "fraud_probability": round(probability, 4),
         "alert": alert,
         "recommended_action": recommended_action,
         "reasons": reasons
@@ -165,7 +226,6 @@ async def serve_frontend():
     index_file = FRONTEND_DIST / "index.html"
 
     if index_file.exists():
-
         return FileResponse(index_file)
 
     return {
@@ -175,36 +235,27 @@ async def serve_frontend():
 
 
 # =========================================================
-# REACT ROUTING FALLBACK
+# FRONTEND FALLBACK
 # =========================================================
 
 @app.get("/{path:path}")
 async def frontend_routes(path: str):
 
-    # Never interfere with API endpoints
-    if path.startswith("analyze"):
-        return {
-            "error": "Not Found"
-        }
+    if path in ["api", "health"]:
+        return {"error": "Not Found"}
 
-    if path.startswith("health"):
-        return {
-            "error": "Not Found"
-        }
 
     requested_file = FRONTEND_DIST / path
 
-    # Serve actual frontend assets/files
     if requested_file.is_file():
-
         return FileResponse(requested_file)
 
-    # For React routes, return index.html
+
     index_file = FRONTEND_DIST / "index.html"
 
     if index_file.exists():
-
         return FileResponse(index_file)
+
 
     return {
         "message": "RiskMind AI",
